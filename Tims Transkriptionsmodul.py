@@ -1,15 +1,14 @@
 ﻿import os
 import threading
 import subprocess
-import tempfile
-import shutil
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk, simpledialog
 import sys
 import time
+import webbrowser
 
 # ---------------------------------
-# Drag-&-Drop initialisieren
+# 1. Drag-&-Drop initialisieren
 # ---------------------------------
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD  # type: ignore
@@ -18,12 +17,11 @@ except ImportError:
     DND_AVAILABLE = False
 
 # ---------------------------------
-# Externe Bibliotheken
+# 2. Externe Bibliotheken
 # ---------------------------------
-import whisperx                      # WhisperX für ASR + Diarisierung
+import whisperx
 import torch
 
-# Diarisierungs-Pipeline (neue WhisperX-API)
 try:
     from whisperx.diarize import DiarizationPipeline
     _DIARIZE_FROM_SUBMODULE = True
@@ -33,21 +31,115 @@ except Exception:
 
 from huggingface_hub import HfApi
 try:
-    from huggingface_hub.utils import HfHubHTTPError
+    from huggingface_hub.utils import HfHubHTTPError, RepositoryNotFoundError
 except Exception:
     try:
-        from huggingface_hub.errors import HfHubHTTPError
+        from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
     except Exception:
-        class HfHubHTTPError(Exception):
-            pass
+        class HfHubHTTPError(Exception): pass
+        class RepositoryNotFoundError(Exception): pass
 
 from fpdf import FPDF
-from docx import Document  # Word-Ausgabe
+from docx import Document
 
 # ---------------------------------
-# Konsole für EXE unterdrücken
+# 3. Sprachen-Definition
 # ---------------------------------
-if getattr(sys, "frozen", False):     
+LANGUAGES_RAW = {
+    "en": "english", "zh": "chinese", "de": "german", "es": "spanish", "ru": "russian", 
+    "ko": "korean", "fr": "french", "ja": "japanese", "pt": "portuguese", "tr": "turkish", 
+    "pl": "polish", "ca": "catalan", "nl": "dutch", "ar": "arabic", "sv": "swedish", 
+    "it": "italian", "id": "indonesian", "hi": "hindi", "fi": "finnish", "vi": "vietnamese", 
+    "he": "hebrew", "uk": "ukrainian", "el": "greek", "ms": "malay", "cs": "czech", 
+    "ro": "romanian", "da": "danish", "hu": "hungarian", "ta": "tamil", "no": "norwegian", 
+    "th": "thai", "ur": "urdu", "hr": "croatian", "bg": "bulgarian", "lt": "lithuanian", 
+    "la": "latin", "mi": "maori", "ml": "malayalam", "cy": "welsh", "sk": "slovak", 
+    "te": "telugu", "fa": "persian", "lv": "latvian", "bn": "bengali", "sr": "serbian", 
+    "az": "azerbaijani", "sl": "slovenian", "kn": "kannada", "et": "estonian", 
+    "mk": "macedonian", "br": "breton", "eu": "basque", "is": "icelandic", "hy": "armenian", 
+    "ne": "nepali", "mn": "mongolian", "bs": "bosnian", "kk": "kazakh", "sq": "albanian", 
+    "sw": "swahili", "gl": "galician", "mr": "marathi", "pa": "punjabi", "si": "sinhala", 
+    "km": "khmer", "sn": "shona", "yo": "yoruba", "so": "somali", "af": "afrikaans", 
+    "oc": "occitan", "ka": "georgian", "be": "belarusian", "tg": "tajik", "sd": "sindhi", 
+    "gu": "gujarati", "am": "amharic", "yi": "yiddish", "lo": "lao", "uz": "uzbek", 
+    "fo": "faroese", "ht": "haitian creole", "ps": "pashto", "tk": "turkmen", "nn": "nynorsk", 
+    "mt": "maltese", "sa": "sanskrit", "lb": "luxembourgish", "my": "myanmar", "bo": "tibetan", 
+    "tl": "tagalog", "mg": "malagasy", "as": "assamese", "tt": "tatar", "haw": "hawaiian", 
+    "ln": "lingala", "ha": "hausa", "ba": "bashkir", "jw": "javanese", "su": "sundanese", 
+    "yue": "cantonese",
+}
+
+GERMAN_NAMES = {
+    "de": "Deutsch", "en": "Englisch", "fr": "Französisch", "es": "Spanisch", "it": "Italienisch",
+    "pt": "Portugiesisch", "nl": "Niederländisch", "pl": "Polnisch", "ru": "Russisch", "zh": "Chinesisch",
+    "ja": "Japanisch", "ko": "Koreanisch", "tr": "Türkisch", "sv": "Schwedisch", "da": "Dänisch",
+    "no": "Norwegisch", "fi": "Finnisch", "cs": "Tschechisch", "el": "Griechisch", "hu": "Ungarisch",
+    "ro": "Rumänisch", "uk": "Ukrainisch", "ar": "Arabisch", "hi": "Hindi", "th": "Thailändisch",
+    "vi": "Vietnamesisch", "id": "Indonesisch"
+}
+
+def get_display_name(code, eng_name):
+    name = GERMAN_NAMES.get(code, eng_name.title()) 
+    return f"{name} ({code})"
+
+LANGUAGE_LIST = sorted(
+    [get_display_name(code, name) for code, name in LANGUAGES_RAW.items()]
+)
+
+# ---------------------------------
+# Utility Class: ToolTip
+# ---------------------------------
+class ToolTip(object):
+    def __init__(self, widget, text='widget info'):
+        self.waittime = 500 
+        self.wraplength = 300 
+        self.widget = widget
+        self.text = text
+        self.widget.bind("<Enter>", self.enter)
+        self.widget.bind("<Leave>", self.leave)
+        self.widget.bind("<ButtonPress>", self.leave)
+        self.id = None
+        self.tw = None
+
+    def enter(self, event=None):
+        self.schedule()
+
+    def leave(self, event=None):
+        self.unschedule()
+        self.hidetip()
+
+    def schedule(self):
+        self.unschedule()
+        self.id = self.widget.after(self.waittime, self.showtip)
+
+    def unschedule(self):
+        id = self.id
+        self.id = None
+        if id:
+            self.widget.after_cancel(id)
+
+    def showtip(self, event=None):
+        x = y = 0
+        x, y, cx, cy = self.widget.bbox("insert")
+        x += self.widget.winfo_rootx() + 25
+        y += self.widget.winfo_rooty() + 20
+        self.tw = tk.Toplevel(self.widget)
+        self.tw.wm_overrideredirect(True)
+        self.tw.wm_geometry("+%d+%d" % (x, y))
+        label = tk.Label(self.tw, text=self.text, justify='left',
+                       background="#ffffe0", relief='solid', borderwidth=1,
+                       wraplength = self.wraplength, font=("tahoma", "8", "normal"))
+        label.pack(ipadx=1)
+
+    def hidetip(self):
+        tw = self.tw
+        self.tw= None
+        if tw: tw.destroy()
+
+# ---------------------------------
+# Konsole unterdrücken (EXE)
+# ---------------------------------
+if getattr(sys, "frozen", False):      
     class _SilentIO:
         def write(self, *_):  pass
         def flush(self):      pass
@@ -55,10 +147,10 @@ if getattr(sys, "frozen", False):
     sys.stderr = sys.stderr or _SilentIO()
 
 # ---------------------------------
-# FFMPEG-Pfad anpassen (falls nötig)
+# FFMPEG
 # ---------------------------------
 if getattr(sys, "frozen", False):
-    base_path = sys._MEIPASS  # type: ignore[attr-defined]
+    base_path = sys._MEIPASS  # type: ignore
 else:
     base_path = os.path.abspath(".")
 
@@ -67,7 +159,7 @@ if FFMPEG_BIN_PATH not in os.environ.get("PATH", ""):
     os.environ["PATH"] += os.pathsep + FFMPEG_BIN_PATH
 
 # ---------------------------------
-# Helferfunktionen
+# Helper
 # ---------------------------------
 def log(text: str):
     log_text.configure(state="normal")
@@ -88,20 +180,18 @@ def fmt_secs(s: float) -> str:
 # Globale State
 # ---------------------------------
 selected_file: str | None = None
-runtime_override: tuple[str, str] | None = None   # (device, compute_type)
 
 # ---------------------------------
-# Drag-&-Drop-Callback
+# Drag & Drop
 # ---------------------------------
 def on_drop(event):
     global selected_file
     try:
-        paths = window.tk.splitlist(event.data)  # type: ignore[attr-defined]
-        if not paths:
-            return
+        paths = window.tk.splitlist(event.data)
+        if not paths: return
         first_path = os.path.normpath(paths[0])
         if not os.path.isfile(first_path):
-            messagebox.showerror("Ungültige Datei", f"Die Datei konnte nicht gefunden werden:\n{first_path}")
+            messagebox.showerror("Ungültige Datei", f"Datei nicht gefunden:\n{first_path}")
             return
         selected_file = first_path
         drop_zone.config(text=os.path.basename(first_path))
@@ -110,84 +200,157 @@ def on_drop(event):
     except Exception as e:
         messagebox.showerror("Drag-&-Drop-Fehler", str(e))
 
-# ---------------------------------
-# Datei per Dialog wählen (Fallback)
-# ---------------------------------
 def choose_file():
     global selected_file
     path = filedialog.askopenfilename(
         title="Wähle eine Datei",
         filetypes=[("Audio/Videodateien", "*.mp3 *.wav *.m4a *.mp4 *.mkv"), ("Alle Dateien", "*.*")],
     )
-    if not path:
-        return
+    if not path: return
     selected_file = path
     drop_zone.config(text=os.path.basename(path))
     transcribe_btn.config(state="normal")
     log(f"[INFO] Datei gesetzt: {selected_file}")
 
 # ---------------------------------
-# Hilfsfunktionen für Diarisierungsausgabe
+# Text-Building
 # ---------------------------------
-def build_diarized_text(result_with_speakers: dict) -> str:
+def build_diarized_text(result_with_speakers: dict, with_timestamps: bool = True) -> str:
+    def _fmt_ts_hhmmss(t: float) -> str:
+        try:
+            t = max(0.0, float(t))
+            h = int(t // 3600)
+            m = int((t % 3600) // 60)
+            s = int(t % 60)
+            return f"{h:02d}:{m:02d}:{s:02d}"
+        except Exception: return "00:00:00"
+
     if not result_with_speakers or "segments" not in result_with_speakers:
         return ""
+
     speaker_map: dict[str, str] = {}
     next_idx = 1
     def map_speaker(raw: str | None) -> str:
         nonlocal next_idx
-        if raw is None:
-            raw = "UNKNOWN"
+        if raw is None: raw = "UNKNOWN"
         if raw not in speaker_map:
             speaker_map[raw] = f"Sprecher {next_idx}"
             next_idx += 1
         return speaker_map[raw]
+
     lines: list[str] = []
     current_speaker: str | None = None
     buffer_words: list[str] = []
+    chunk_start: float | None = None
+    last_end: float | None = None
+
+    used_word_level = False
     for seg in result_with_speakers.get("segments", []):
-        for w in seg.get("words", []):
-            spk = w.get("speaker")
-            word = (w.get("word") or "").strip()
-            if not word:
-                continue
-            if spk != current_speaker:
-                if buffer_words and current_speaker is not None:
-                    lines.append(f"{map_speaker(current_speaker)}: {' '.join(buffer_words).strip()}")
-                    buffer_words = []
-                current_speaker = spk
-            buffer_words.append(word)
-    if buffer_words and current_speaker is not None:
-        lines.append(f"{map_speaker(current_speaker)}: {' '.join(buffer_words).strip()}")
-    if not lines:
+        words = seg.get("words", [])
+        if words:
+            used_word_level = True
+            for w in words:
+                spk = w.get("speaker")
+                word = (w.get("word") or "").strip()
+                w_start = w.get("start")
+                w_end   = w.get("end")
+                if not word: continue
+
+                if spk != current_speaker:
+                    if buffer_words and current_speaker is not None:
+                        ts = ""
+                        if with_timestamps and (chunk_start is not None) and (last_end is not None):
+                            ts = f"[{_fmt_ts_hhmmss(chunk_start)}–{_fmt_ts_hhmmss(last_end)}] "
+                        lines.append(f"{ts}{map_speaker(current_speaker)}: {' '.join(buffer_words).strip()}")
+                        buffer_words = []
+                    current_speaker = spk
+                    chunk_start = w_start
+                buffer_words.append(word)
+                if isinstance(w_end, (int, float)):
+                    last_end = w_end
+
+    if not used_word_level:
         for seg in result_with_speakers.get("segments", []):
             spk = seg.get("speaker")
-            txt = seg.get("text", "").strip()
-            if txt:
-                lines.append(f"{map_speaker(spk)}: {txt}")
+            txt = (seg.get("text") or "").strip()
+            if not txt: continue
+            ts = ""
+            if with_timestamps and ("start" in seg) and ("end" in seg):
+                ts = f"[{_fmt_ts_hhmmss(seg['start'])}–{_fmt_ts_hhmmss(seg['end'])}] "
+            label = map_speaker(spk)
+            lines.append(f"{ts}{label}: {txt}")
+
+    if used_word_level and buffer_words and current_speaker is not None:
+        ts = ""
+        if with_timestamps and (chunk_start is not None) and (last_end is not None):
+            ts = f"[{_fmt_ts_hhmmss(chunk_start)}–{_fmt_ts_hhmmss(last_end)}] "
+        lines.append(f"{ts}{map_speaker(current_speaker)}: {' '.join(buffer_words).strip()}")
+
     return "\n".join(lines).strip()
 
-# --------- Sichere Token-Abfrage ---------
-def ask_hf_token_mainthread() -> str:
-    token = os.environ.get("HUGGINGFACE_TOKEN", "").strip()
-    if token:
-        return token
-    return simpledialog.askstring(
+# ---------------------------------
+# Token Logic
+# ---------------------------------
+class UserAbortException(Exception):
+    pass
+
+def ask_hf_token_mainthread(mode="transcribe") -> str | None:
+    if mode == "check":
+        new_token = simpledialog.askstring(
+            "Hugging Face Token",
+            "Bitte Token eingeben (wird für diese Sitzung gespeichert):",
+            show='*'
+        )
+        if new_token:
+            os.environ["HUGGINGFACE_TOKEN"] = new_token.strip()
+            return new_token.strip()
+        else:
+            return None
+
+    env_token = os.environ.get("HUGGINGFACE_TOKEN", "").strip()
+    
+    if env_token:
+        preview = env_token[:5] + "..." if len(env_token) > 5 else "***"
+        response = messagebox.askyesno(
+            "Token gefunden",
+            f"Token gefunden in: System-Variablen (Arbeitsspeicher)\n"
+            f"Vorschau: {preview}\n\n"
+            "Eine erneute Eingabe ist nicht notwendig.\n"
+            "Möchten Sie mit diesem Token fortfahren?",
+            icon='info'
+        )
+        if response:
+            return env_token
+
+    new_token = simpledialog.askstring(
         "Hugging Face Token",
-        "Für die Sprechererkennung wird ein Hugging-Face-Access-Token benötigt.\n"
-        "Bitte Token eingeben (wird nur für diesen Lauf verwendet):",
+        "Bitte Token eingeben (wird für diese Sitzung gespeichert):",
         show='*'
-    ) or ""
+    )
+
+    if not new_token:
+        go_without = messagebox.askyesno(
+            "Kein Token", 
+            "Es wurde kein Token übergeben. Möchten Sie ohne automatische Sprechererkennung fortfahren?",
+            icon='warning'
+        )
+        if go_without:
+            return None 
+        else:
+            raise UserAbortException("Benutzer hat abgebrochen (Kein Token).")
+
+    if new_token:
+        os.environ["HUGGINGFACE_TOKEN"] = new_token.strip()
+
+    return new_token.strip()
 
 def extract_text_from_asr(asr_result: dict) -> str:
     txt = (asr_result.get("text") or "").strip()
-    if txt:
-        return txt
+    if txt: return txt
     parts = []
     for seg in asr_result.get("segments", []):
         s = (seg.get("text") or "").strip()
-        if s:
-            parts.append(s)
+        if s: parts.append(s)
     return " ".join(parts).strip()
 
 def _annotation_to_df(maybe_annotation):
@@ -200,32 +363,34 @@ def _annotation_to_df(maybe_annotation):
             return pd.DataFrame(rows)
         if isinstance(maybe_annotation, list) and maybe_annotation and isinstance(maybe_annotation[0], dict):
             return pd.DataFrame(maybe_annotation)
-    except Exception:
-        pass
+    except Exception: pass
     return maybe_annotation
 
 def ensure_pyannote_access(token: str) -> tuple[bool, str]:
     if not token:
         return False, "Kein Token übergeben."
+    api = HfApi()
     try:
-        api = HfApi()
+        user = api.whoami(token=token)
+    except Exception:
+        return False, "Token ist ungültig (Format falsch oder Account existiert nicht)."
+
+    try:
         api.model_info("pyannote/speaker-diarization-3.1", token=token)
         api.model_info("pyannote/segmentation-3.0", token=token)
-        return True, ""
-    except HfHubHTTPError:
-        return False, (
-            "Kein Zugriff auf die pyannote-Pipelines.\n"
-            "Bitte auf Hugging Face die Bedingungen der Repos akzeptieren "
-            "und mit demselben Konto einen READ-Token verwenden."
-        )
+        return True, f"Zugriff OK (User: {user.get('name', 'Unbekannt')})"
+    except (HfHubHTTPError, RepositoryNotFoundError):
+        return False, "Token gültig, aber Bedingungen auf Hugging Face nicht akzeptiert."
     except Exception as e:
-        return False, f"Zugriffsprüfung fehlgeschlagen: {e}"
+        return False, f"Fehler bei Prüfung: {e}"
 
 # ---------------------------------
-# Hardware-Check & Auto-Wahl
+# Hardware-Check
 # ---------------------------------
 def pick_runtime() -> tuple[str, str, dict]:
-    info = {"device_name": "CPU", "cc": None, "vram_gb": None, "note": ""}
+    info = {"device_name": "Unbekannt", "cc": None, "vram_gb": None, "note": ""}
+    torch_version = torch.__version__
+    
     if torch.cuda.is_available():
         try:
             name = torch.cuda.get_device_name(0)
@@ -233,86 +398,41 @@ def pick_runtime() -> tuple[str, str, dict]:
             props = torch.cuda.get_device_properties(0)
             vram_gb = round(props.total_memory / (1024**3), 1)
             info.update({"device_name": name, "cc": f"{major}.{minor}", "vram_gb": vram_gb})
+            
             if major >= 7 or (major == 6 and minor == 0):
-                info["note"] = "GPU mit schnellem FP16 erkannt"
+                info["note"] = f"GPU aktiv (PyTorch {torch_version})."
                 return "cuda", "float16", info
-            info["note"] = "Pascal 6.1 erkannt – CPU int8 bevorzugt"
+            
+            info["note"] = f"GPU '{name}' (Pascal) da, aber CPU für Stabilität bevorzugt."
             return "cpu", "int8", info
         except Exception as e:
-            info["note"] = f"CUDA-Infos nicht lesbar: {e}"
+            info["note"] = f"GPU-Fehler ({e}) -> CPU."
             return "cpu", "int8", info
-    info["note"] = "Keine CUDA-GPU – CPU int8"
+
+    if "cpu" in torch_version:
+        info["note"] = f"PyTorch-Version ist '{torch_version}' (CPU-Only). Bitte 'cuda'-Version installieren!"
+    else:
+        info["note"] = f"Keine Nvidia-GPU gefunden (PyTorch {torch_version})."
+        
     return "cpu", "int8", info
 
 def safe_load_asr_model(model_key: str, device: str, compute_type: str):
-    log(f"[INFO] Lade Modell – Wunsch: device={device}, compute_type={compute_type}")
+    log(f"[INFO] Lade Modell – Wunsch: {device} ({compute_type})")
     try:
         model = whisperx.load_model(model_key, device=device, compute_type=compute_type)
         return model, device, compute_type
     except Exception as e:
-        log(f"[WARN] load_model(device={device}, compute_type={compute_type}) fehlgeschlagen: {e}")
-    
-    # Fallbacks...
+        log(f"[WARN] Laden fehlgeschlagen: {e}")
     if device == "cuda":
         try:
-            log("[INFO] GPU-Fallback: compute_type=float32 …")
+            log("[INFO] GPU-Fallback: Versuche float32 …")
             model = whisperx.load_model(model_key, device="cuda", compute_type="float32")
             return model, "cuda", "float32"
         except Exception as e2:
             log(f"[WARN] GPU (float32) ging nicht: {e2}")
-
-    log("[INFO] Fallback auf CPU float32 …")
+    log("[INFO] Letzter Fallback: CPU float32 …")
     model = whisperx.load_model(model_key, device="cpu", compute_type="float32")
     return model, "cpu", "float32"
-
-# ---------------------------------
-# Snippet & Benchmark
-# ---------------------------------
-def make_10s_snippet(src_path: str) -> tuple[str, str]:
-    tmpdir = tempfile.mkdtemp(prefix="whx_bench_")
-    out_wav = os.path.join(tmpdir, "snippet.wav")
-    cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-ss", "0", "-t", "10",
-        "-i", src_path,
-        "-ac", "1", "-ar", "16000", "-vn",
-        out_wav
-    ]
-    subprocess.run(cmd, check=True)
-    return out_wav, tmpdir
-
-def do_benchmark(snippet_path: str, model_key: str):
-    candidates: list[tuple[str, str]] = [("cpu", "int8"), ("cuda", "float16")]
-    times: dict[tuple[str, str], float] = {}
-
-    for want_dev, want_ct in candidates:
-        label = f"{want_dev.upper()} {want_ct}"
-        log(f"[BENCH] Prüfe: {label} ...")
-        t0 = time.perf_counter()
-        model, used_dev, used_ct = safe_load_asr_model(model_key, want_dev, want_ct)
-        t1 = time.perf_counter()
-        _t0 = time.perf_counter()
-        _ = model.transcribe(snippet_path, batch_size=16)
-        _t1 = time.perf_counter()
-        total = (t1 - t0) + (_t1 - _t0)
-        times[(used_dev, used_ct)] = total
-        log(f"[BENCH] Ergebnis {used_dev.upper()} {used_ct}: {fmt_secs(total)}s")
-        try:
-            del model
-        except Exception:
-            pass
-        if used_dev == "cuda":
-            try:
-                import torch as _t
-                _t.cuda.empty_cache()
-            except Exception:
-                pass
-
-    if not times:
-        raise RuntimeError("Kein Benchmark möglich.")
-    best = min(times.items(), key=lambda kv: kv[1])
-    (best_dev, best_ct), best_time = best
-    return best_dev, best_ct, best_time, times
 
 # ---------------------------------
 # Speichern
@@ -340,55 +460,49 @@ def ask_and_save(text: str):
         filetypes=[("Word-Dokument", "*.docx"), ("PDF", "*.pdf")],
         initialfile=f"Transkript_{time.strftime('%Y%m%d_%H%M%S')}"
     )
-    if not path:
-        return None
+    if not path: return None
     ext = os.path.splitext(path)[1].lower()
-    if ext == ".pdf":
-        save_as_pdf(path, text)
+    if ext == ".pdf": save_as_pdf(path, text)
     else:
-        if ext not in (".docx", ".pdf"):
-            path = path + ".docx"
+        if ext not in (".docx", ".pdf"): path = path + ".docx"
         save_as_docx(path, text)
     return path
 
 # ---------------------------------
-# Transkription
+# Main Logic
 # ---------------------------------
 def transcribe():
     if selected_file is None:
         messagebox.showwarning("Keine Datei", "Bitte zuerst eine Datei wählen oder ziehen.")
         return
+    hf_token_main = ""
+    run_diarization = False
+    if diarize_var.get():
+        try:
+            result = ask_hf_token_mainthread(mode="transcribe")
+            if result is None:
+                run_diarization = False
+                log("[INFO] User hat 'Ohne Sprechererkennung' gewählt.")
+            else:
+                hf_token_main = result
+                run_diarization = True
+        except UserAbortException:
+            log("[ABBRUCH] Vorgang vom Benutzer abgebrochen.")
+            return
+    else:
+        run_diarization = False
 
-    hf_token_main = ask_hf_token_mainthread() if diarize_var.get() else ""
-
-    def task(hf_token: str = hf_token_main):
+    def task(hf_token: str, do_diarize: bool):
         try:
             log(f"[DEBUG] Transkribiere: {selected_file}")
-            global runtime_override
-            tmpdir = None
-            if runtime_override is None:
-                log("[INFO] Starte automatischen Benchmark...")
-                try:
-                    snippet, tmpdir = make_10s_snippet(selected_file)
-                    best_dev, best_ct, best_time, _times = do_benchmark(snippet, model_var.get())
-                    runtime_override = (best_dev, best_ct)
-                    log(f"[BENCH] Gewinner: {best_dev.upper()} {best_ct} ({fmt_secs(best_time)})")
-                except Exception as e:
-                    log(f"[BENCH] Auto-Benchmark nicht möglich, nutze Heuristik: {e}")
-                finally:
-                    if tmpdir:
-                        try:
-                            shutil.rmtree(tmpdir, ignore_errors=True)
-                        except Exception:
-                            pass
-
-            if runtime_override:
-                device, compute_type = runtime_override
-                info = {"note": "Benchmark-Ergebnis"}
-            else:
-                device, compute_type, info = pick_runtime()
-
-            log(f"[INFO] Laufzeitwahl: {device.upper()} ({info})")
+            device, compute_type, info = pick_runtime()
+            dev_name = info.get("device_name", "Unbekannt")
+            note = info.get("note", "")
+            log(f"--------------------------------------------------")
+            log(f"[HARDWARE] Grafikkarte: {dev_name}")
+            log(f"[HARDWARE] Gewählter Modus: {device.upper()} ({compute_type})")
+            if note: log(f"[INFO] Erklärung: {note}")
+            log(f"--------------------------------------------------")
 
             model_key = model_var.get()
             update_progress(5, "Modell laden …")
@@ -398,37 +512,47 @@ def transcribe():
 
             update_progress(25, "Transkription …")
             t1 = time.time()
-            asr_result = asr_model.transcribe(selected_file, batch_size=16)
-            lang = asr_result.get("language", "unbekannt")
-            log(f"[INFO] Erkannte Sprache: {str(lang).upper()}")
-            log(f"[DEBUG] Transkription dauerte {time.time() - t1:.2f}s.")
+            transcribe_kwargs = { "batch_size": 16, "task": "transcribe" }
+            if not auto_lang_var.get():
+                raw_sel = lang_combobox.get()
+                if "(" in raw_sel and raw_sel.endswith(")"):
+                    lang_code = raw_sel.split("(")[-1].strip(")")
+                    transcribe_kwargs["language"] = lang_code
+                    log(f"[INFO] Manuelle Sprache: {lang_code}")
+                else:
+                    log("[WARN] Sprache nicht erkannt, Auto-Detect.")
+            else:
+                log("[INFO] Sprache wird automatisch erkannt.")
+
+            asr_result = asr_model.transcribe(selected_file, **transcribe_kwargs)
+            detected_lang = asr_result.get("language", "unbekannt")
+            log(f"[INFO] Erkannte Sprache: {str(detected_lang).upper()}")
+            log(f"[DEBUG] Transkription fertig in {time.time() - t1:.2f}s.")
 
             update_progress(45, "Ausrichten …")
-            t2 = time.time()
+            aligned_result = {"segments": asr_result.get("segments", []), "text": asr_result.get("text", "")}
             try:
                 align_model, metadata = whisperx.load_align_model(language_code=asr_result["language"], device=used_device)
                 aligned_result = whisperx.align(
                     asr_result["segments"], align_model, metadata, selected_file, used_device, return_char_alignments=False
                 )
             except Exception as e:
-                log(f"[WARN] Alignment nicht möglich, nutze rohe Segmente: {e}")
-                aligned_result = {"segments": asr_result.get("segments", []), "text": asr_result.get("text", "")}
+                log(f"[WARN] Alignment fehlgeschlagen, nutze rohe Segmente: {e}")
 
             diarization_ok = False
             diarized_result = aligned_result
-            if diarize_var.get():
+            if do_diarize:
                 update_progress(65, "Sprechererkennung …")
                 try:
                     ok, msg = ensure_pyannote_access(hf_token)
                     if not ok:
                         log(f"[HINWEIS] {msg}")
-                        window.after(0, lambda: messagebox.showinfo("Sprechererkennung nicht verfügbar", msg))
+                        window.after(0, lambda: messagebox.showinfo("Fehler", msg))
                     else:
                         if _DIARIZE_FROM_SUBMODULE and DiarizationPipeline is not None:
                             diarize_pipeline = DiarizationPipeline(use_auth_token=hf_token, device=used_device)
                         else:
                             diarize_pipeline = whisperx.DiarizationPipeline(use_auth_token=hf_token, device=used_device)
-
                         diarize_segments = diarize_pipeline(selected_file)
                         diarize_segments = _annotation_to_df(diarize_segments)
                         diarized_result = whisperx.assign_word_speakers(diarize_segments, aligned_result)
@@ -436,6 +560,8 @@ def transcribe():
                         log(f"[INFO] Sprechererkennung erfolgreich.")
                 except Exception as e:
                     log(f"[WARN] Diarisierung fehlgeschlagen: {e}")
+            else:
+                log("[INFO] Sprechererkennung übersprungen (kein Token oder deaktiviert).")
             
             update_progress(80, "Text aufbereiten …")
             base_text = extract_text_from_asr(asr_result)
@@ -457,13 +583,13 @@ def transcribe():
         finally:
             update_progress(0, "")
 
-    threading.Thread(target=task, args=(hf_token_main,), daemon=True).start()
+    threading.Thread(target=task, args=(hf_token_main, run_diarization), daemon=True).start()
 
-# ---------------------------------
-# Diagnose
-# ---------------------------------
 def check_token_access():
-    token = ask_hf_token_mainthread()
+    token = ask_hf_token_mainthread(mode="check")
+    if not token: 
+        status_var.set("Abbruch")
+        return
     status_var.set("Prüfe Zugriff …")
     status_lbl.configure(foreground="#666666")
     def _run():
@@ -475,13 +601,16 @@ def check_token_access():
             else:
                 status_var.set("Kein Zugriff")
                 status_lbl.configure(foreground="#cc0000")
-                if msg:
-                    messagebox.showinfo("Hinweis", msg)
+                if msg: messagebox.showinfo("Hinweis", msg)
         window.after(0, _update)
     threading.Thread(target=_run, daemon=True).start()
 
+def open_links(event=None):
+    webbrowser.open("https://huggingface.co/pyannote/segmentation-3.0")
+    webbrowser.open("https://huggingface.co/pyannote/speaker-diarization-3.1")
+
 # ---------------------------------
-# GUI
+# GUI Setup
 # ---------------------------------
 if DND_AVAILABLE:
     window: 'TkinterDnD.Tk' = TkinterDnD.Tk()  # type: ignore
@@ -491,7 +620,7 @@ else:
 window.title("Tims Transkriptionsmodul")
 window.resizable(False, False)
 
-# --- Drop-Zone ---
+# --- Drop Zone ---
 drop_label_txt = "Datei hierher ziehen …" if DND_AVAILABLE else "Datei auswählen"
 label = tk.Label(window, text=drop_label_txt, font=("Arial", 11))
 label.pack(pady=(10, 2))
@@ -499,27 +628,63 @@ label.pack(pady=(10, 2))
 zone_opts = {"relief": "groove", "width": 50, "height": 4, "bg": "#fafafa", "text": "⇩ Drag & Drop ⇩"}
 drop_zone = tk.Label(window, **zone_opts)
 if DND_AVAILABLE:
-    drop_zone.drop_target_register(DND_FILES)  # type: ignore
-    drop_zone.dnd_bind("<<Drop>>", on_drop)  # type: ignore
+    drop_zone.drop_target_register(DND_FILES)
+    drop_zone.dnd_bind("<<Drop>>", on_drop)
     drop_zone.pack(padx=20, pady=(0, 8))
 else:
     drop_zone.pack(padx=20, pady=(0, 4))
     tk.Button(window, text="Datei auswählen …", command=choose_file).pack(pady=(0, 8))
 
-# --- Modell Auswahl ---
+# --- Model Selection ---
 model_var = tk.StringVar(value="medium")
 model_dd = ttk.Combobox(window, textvariable=model_var, state="readonly", width=40)
 model_dd["values"] = ["tiny", "base", "small", "medium", "large-v2", "large-v3"]
 model_dd.pack()
-
 tk.Label(window, text="tiny | base | small | medium (empfohlen) | large", font=("Arial", 9)).pack(pady=(2, 10))
 
-# --- Optionen ---
+# --- Options ---
 options = tk.LabelFrame(window, text="Optionen", padx=10, pady=6)
 options.pack(fill="x", padx=15, pady=(0, 10))
+
+col1 = tk.Frame(options)
+col1.pack(side="left", anchor="n", padx=(0, 20))
+
+check_frame = tk.Frame(col1)
+check_frame.pack(anchor="w")
+
 diarize_var = tk.BooleanVar(value=True)
-ttk.Checkbutton(options, text="Automatische Sprechererkennung", variable=diarize_var).pack(anchor="w")
-ttk.Button(options, text="Token prüfen", command=check_token_access).pack(side="left", pady=5)
+ttk.Checkbutton(check_frame, text="Automatische Sprechererkennung", variable=diarize_var).pack(side="left")
+
+help_lbl = tk.Label(check_frame, text="[?]", fg="blue", cursor="hand2", font=("Arial", 9, "bold"))
+help_lbl.pack(side="left", padx=5)
+help_lbl.bind("<Button-1>", open_links)
+
+tooltip_text = (
+    "Für die Sprechererkennung benötigen Sie einen Hugging-Face-Account.\n"
+    "Sie müssen folgende Bedingungen akzeptieren:\n\n"
+    "1. pyannote/segmentation-3.0\n"
+    "2. pyannote/speaker-diarization-3.1\n\n"
+    "(Klicken Sie auf dieses [?], um die Webseiten zu öffnen)"
+)
+ToolTip(help_lbl, tooltip_text)
+
+ttk.Button(col1, text="Token prüfen", command=check_token_access).pack(anchor="w", pady=(5,0))
+
+col2 = tk.Frame(options)
+col2.pack(side="left", anchor="n")
+
+def toggle_lang_dropdown():
+    if auto_lang_var.get():
+        lang_combobox.configure(state="disabled")
+    else:
+        lang_combobox.configure(state="readonly")
+
+auto_lang_var = tk.BooleanVar(value=True)
+ttk.Checkbutton(col2, text="Sprache automatisch erkennen", variable=auto_lang_var, command=toggle_lang_dropdown).pack(anchor="w")
+
+lang_combobox = ttk.Combobox(col2, values=LANGUAGE_LIST, state="disabled", width=25)
+lang_combobox.set("Deutsch (de)") 
+lang_combobox.pack(anchor="w", pady=(5,0))
 
 # --- Buttons ---
 transcribe_btn = tk.Button(window, text="Transkription beginnen", command=transcribe, state="disabled")
@@ -534,8 +699,27 @@ progress_label.pack()
 log_text = tk.Text(window, width=90, height=18, state="disabled")
 log_text.pack(padx=10, pady=(5, 10))
 status_var = tk.StringVar(value="")
-status_lbl = tk.Label(options, textvariable=status_var)
-status_lbl.pack(anchor="w")
+status_lbl = tk.Label(window, textvariable=status_var) 
+status_lbl.pack(anchor="w", padx=20)
+
+# ---------------------------------
+# Kontakt
+# ---------------------------------
+def open_linkedin(event=None):
+    webbrowser.open("https://de.linkedin.com/in/tim-lagemann-a78014187")
+
+footer_frame = tk.Frame(window)
+footer_frame.pack(side="bottom", pady=(0, 10))
+
+author_lbl = tk.Label(footer_frame, text="Autor: Tim Lagemann", fg="black", cursor="hand2", font=("Arial", 9, "bold"))
+author_lbl.pack(side="left", padx=(0, 5))
+author_lbl.bind("<Button-1>", open_linkedin)
+
+icon_canvas = tk.Canvas(footer_frame, width=20, height=20, bg="white", highlightthickness=0, cursor="hand2")
+icon_canvas.pack(side="left")
+icon_canvas.create_rectangle(0, 0, 20, 20, fill="#0077b5", outline="")
+icon_canvas.create_text(10, 10, text="in", fill="white", font=("Arial", 12, "bold"))
+icon_canvas.bind("<Button-1>", open_linkedin)
 
 if not DND_AVAILABLE:
     log("[HINWEIS] tkinterdnd2 nicht installiert – Drag & Drop deaktiviert.")

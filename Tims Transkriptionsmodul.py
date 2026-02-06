@@ -1,4 +1,4 @@
-﻿import os
+import os
 import threading
 import subprocess
 import tkinter as tk
@@ -389,32 +389,49 @@ def ensure_pyannote_access(token: str) -> tuple[bool, str]:
 # ---------------------------------
 def pick_runtime() -> tuple[str, str, dict]:
     info = {"device_name": "Unbekannt", "cc": None, "vram_gb": None, "note": ""}
+    
+    # 1. Version prüfen
     torch_version = torch.__version__
     
+    # 2. CUDA Check (NVIDIA)
     if torch.cuda.is_available():
         try:
             name = torch.cuda.get_device_name(0)
             major, minor = torch.cuda.get_device_capability(0)
             props = torch.cuda.get_device_properties(0)
             vram_gb = round(props.total_memory / (1024**3), 1)
+            
             info.update({"device_name": name, "cc": f"{major}.{minor}", "vram_gb": vram_gb})
             
-            if major >= 7 or (major == 6 and minor == 0):
-                info["note"] = f"GPU aktiv (PyTorch {torch_version})."
+            
+            if major >= 6:
+                info["note"] = f"GPU aktiv (PyTorch {torch_version}). Pascal+ erkannt."
                 return "cuda", "float16", info
             
-            info["note"] = f"GPU '{name}' (Pascal) da, aber CPU für Stabilität bevorzugt."
+            info["note"] = f"GPU '{name}' zu alt (< 6.0), nutze CPU."
             return "cpu", "int8", info
+
         except Exception as e:
             info["note"] = f"GPU-Fehler ({e}) -> CPU."
             return "cpu", "int8", info
 
+    # 3. Apple Silicon Check
+    try:
+        if torch.backends.mps.is_available():
+            info["device_name"] = "Apple Silicon (M-Chip)"
+            info["note"] = "Mac erkannt. Nutze CPU (float32) für maximale Stabilität."
+            return "cpu", "float32", info
+    except Exception:
+        pass
+
+    # 4. Standard CPU Fallback
     if "cpu" in torch_version:
-        info["note"] = f"PyTorch-Version ist '{torch_version}' (CPU-Only). Bitte 'cuda'-Version installieren!"
+        info["note"] = f"PyTorch-Version ist '{torch_version}' (CPU-Only). Bitte 'cuda'-Version installieren für NVIDIA!"
     else:
-        info["note"] = f"Keine Nvidia-GPU gefunden (PyTorch {torch_version})."
+        info["note"] = f"Keine GPU gefunden. Nutze CPU."
         
     return "cpu", "int8", info
+
 
 def safe_load_asr_model(model_key: str, device: str, compute_type: str):
     log(f"[INFO] Lade Modell – Wunsch: {device} ({compute_type})")
@@ -433,6 +450,7 @@ def safe_load_asr_model(model_key: str, device: str, compute_type: str):
     log("[INFO] Letzter Fallback: CPU float32 …")
     model = whisperx.load_model(model_key, device="cpu", compute_type="float32")
     return model, "cpu", "float32"
+
 
 # ---------------------------------
 # Speichern
@@ -578,8 +596,9 @@ def transcribe():
             update_progress(100, "Fertig")
 
         except Exception as e:
-            log(f"[FEHLER] {e}")
-            window.after(0, lambda: messagebox.showerror("Fehler", str(e)))
+            err_msg = str(e)
+            log(f"[FEHLER] {err_msg}")
+            window.after(0, lambda: messagebox.showerror("Fehler", err_msg))
         finally:
             update_progress(0, "")
 
@@ -703,7 +722,7 @@ status_lbl = tk.Label(window, textvariable=status_var)
 status_lbl.pack(anchor="w", padx=20)
 
 # ---------------------------------
-# Kontakt
+# Kontaktdaten
 # ---------------------------------
 def open_linkedin(event=None):
     webbrowser.open("https://de.linkedin.com/in/tim-lagemann-a78014187")

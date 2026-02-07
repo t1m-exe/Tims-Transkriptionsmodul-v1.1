@@ -34,6 +34,16 @@ Im Gegensatz zu kommerziellen Cloud-Diensten erfolgt die Datenverarbeitung **vol
 
 ---
 
+## 📚 Credits & Referenzen
+
+Dieses Tool baut auf der hervorragenden Arbeit der Open-Source-Community auf. Ein besonderer Dank geht an die Autoren der folgenden Projekte:
+
+* **[WhisperX](https://github.com/m-bain/whisperX):** Max Bain et al. für die Optimierung von Whisper mit Sprecher-Diarization und präzisem Alignment.
+* **[OpenAI Whisper](https://github.com/openai/whisper):** Für das grundlegende Spracherkennungsmodell.
+* **[Pyannote Audio](https://github.com/pyannote/pyannote-audio):** Für die Sprecher-Segmentierung und Erkennung.
+
+---
+
 ## 🤝 Mitwirkung & Kontakt
 Da dieses Tool primär für den Forschungskontext entwickelt wurde, ist der Quellcode offen für Anpassungen. Feedback zur Funktionalität, Bug-Reports sowie Vorschläge zur Code-Optimierung aus der Community sind willkommen.
 
